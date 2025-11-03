@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // Config holds all our settings.
@@ -24,6 +26,7 @@ type Config struct {
 	UploadToDrive    bool    `json:"upload_to_drive"`
 	RcloneRemote     string  `json:"rclone_remote"`
 	DriveSubfolder   string  `json:"drive_subfolder"`
+	SetlistFile      string  `json:"setlist_file"`
 }
 
 // segment holds the start and end time of a clip
@@ -43,6 +46,7 @@ var defaultConfig = Config{
 	UploadToDrive:    false,
 	RcloneRemote:     "gdrive:",
 	DriveSubfolder:   "SplitSongs",
+	SetlistFile:      "",
 }
 
 // --- 2. Flag variables (global) ---
@@ -57,6 +61,7 @@ var (
 	cliUpload        bool
 	cliRemote        string
 	cliSubfolder     string
+	cliSetlistFile   string
 )
 
 // defineFlags registers all CLI flags
@@ -71,6 +76,7 @@ func defineFlags() {
 	flag.BoolVar(&cliUpload, "upload", defaultConfig.UploadToDrive, "Upload output folder to Google Drive")
 	flag.StringVar(&cliRemote, "remote", defaultConfig.RcloneRemote, "rclone remote name (e.g., 'gdrive:')")
 	flag.StringVar(&cliSubfolder, "subfolder", defaultConfig.DriveSubfolder, "Google Drive subfolder to upload to")
+	flag.StringVar(&cliSetlistFile, "setlist", defaultConfig.SetlistFile, "Path to a .txt setlist file for renaming")
 }
 
 // loadConfig manages loading settings from defaults, file, and (parsed) cli flags.
@@ -79,7 +85,7 @@ func loadConfig() (Config, error) {
 	cfg := defaultConfig
 
 	// 2. Load Config File
-	fileConfig, err := loadConfigFromFile(configFilePath) // Uses global configFilePath
+	fileConfig, err := loadConfigFromFile(configFilePath)
 	if err == nil {
 		// Merge fileConfig onto defaultConfig
 		if fileConfig.InputFile != "" {
@@ -109,8 +115,10 @@ func loadConfig() (Config, error) {
 		if fileConfig.DriveSubfolder != "" {
 			cfg.DriveSubfolder = fileConfig.DriveSubfolder
 		}
+		if fileConfig.SetlistFile != "" {
+			cfg.SetlistFile = fileConfig.SetlistFile
+		}
 	} else if !os.IsNotExist(err) {
-		// File exists but is bad
 		log.Printf("Warning: Could not parse config file '%s': %v. Using defaults.", configFilePath, err)
 	}
 
@@ -147,6 +155,9 @@ func loadConfig() (Config, error) {
 	if userSetFlags["subfolder"] {
 		cfg.DriveSubfolder = cliSubfolder
 	}
+	if userSetFlags["setlist"] {
+		cfg.SetlistFile = cliSetlistFile
+	}
 
 	return cfg, nil
 }
@@ -165,7 +176,7 @@ func loadConfigFromFile(path string) (Config, error) {
 	return fileConfig, nil
 }
 
-// main is the entry point of our script
+// main is the entry point of our script (MODIFIED)
 func main() {
 	// 1. Define & Parse flags
 	defineFlags()
@@ -193,7 +204,6 @@ func main() {
 		}
 		log.Println("rclone connection successful.")
 	}
-	// --- End Pre-Check ---
 
 	// 4. Check for ffmpeg
 	if !isFFmpegInstalled() {
@@ -225,16 +235,25 @@ func main() {
 	}
 
 	// 10. Export valid songs
+	var exportedFiles []string // <-- DECLARED HERE
 	if len(songSegments) == 0 {
 		log.Println("No song segments found that meet the minimum length criteria.")
 	} else {
 		log.Printf("Found %d non-silent (song) segment(s) that meet criteria.", len(songSegments))
-		splitVideoIntoSegments(cfg, songSegments)
+		exportedFiles = splitVideoIntoSegments(cfg, songSegments) // <-- ASSIGNED HERE
 	}
 
-	// 11. Upload to Drive (Optional)
+	// 11. --- Rename from Setlist (Optional) ---
+	if cfg.SetlistFile != "" {
+		if len(exportedFiles) > 0 {
+			renameFilesFromSetlist(cfg, exportedFiles)
+		} else {
+			log.Println("Skipping setlist rename, no files were exported.")
+		}
+	}
+
+	// 12. Upload to Drive (Optional)
 	if cfg.UploadToDrive {
-		// We already know rclone is installed, so we just check if the output dir exists
 		if _, err := os.Stat(cfg.OutputDir); os.IsNotExist(err) {
 			log.Printf("Skipping upload, output directory '%s' does not exist.", cfg.OutputDir)
 		} else {
@@ -247,7 +266,7 @@ func main() {
 
 // --- Helper Functions ---
 
-// isFFmpegInstalled
+// isFFmpegInstalled (unchanged)
 func isFFmpegInstalled() bool {
 	cmd := exec.Command("ffmpeg", "-version")
 	if err := cmd.Run(); err != nil {
@@ -256,7 +275,7 @@ func isFFmpegInstalled() bool {
 	return true
 }
 
-// runFFmpeg
+// runFFmpeg (unchanged)
 func runFFmpeg(args ...string) (string, error) {
 	cmd := exec.Command("ffmpeg", args...)
 	var stderr bytes.Buffer
@@ -265,7 +284,7 @@ func runFFmpeg(args ...string) (string, error) {
 	return stderr.String(), err
 }
 
-// isRcloneInstalled checks if rclone is available in the system's PATH
+// isRcloneInstalled (unchanged)
 func isRcloneInstalled() bool {
 	cmd := exec.Command("rclone", "version")
 	if err := cmd.Run(); err != nil {
@@ -274,27 +293,20 @@ func isRcloneInstalled() bool {
 	return true
 }
 
-// testRcloneConnection attempts to create the target directory to verify auth
+// testRcloneConnection (unchanged)
 func testRcloneConnection(cfg Config) error {
 	log.Println("Verifying rclone remote and permissions...")
-	// Construct the destination path (e.g., "gdrive:SplitSongs")
 	destination := cfg.RcloneRemote + cfg.DriveSubfolder
-
 	cmd := exec.Command("rclone", "mkdir", destination)
-
-	// We need to capture stderr, as rclone prints errors there
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-
 	if err := cmd.Run(); err != nil {
-		// Command failed
 		return fmt.Errorf("could not access rclone remote '%s'.\nError: %s", destination, stderr.String())
 	}
-	// Command succeeded
 	return nil
 }
 
-// getVideoDuration
+// getVideoDuration (unchanged)
 func getVideoDuration(cfg Config) float64 {
 	log.Println("Getting video duration...")
 	output, _ := runFFmpeg("-i", cfg.InputFile)
@@ -310,7 +322,7 @@ func getVideoDuration(cfg Config) float64 {
 	return (hours * 3600) + (minutes * 60) + seconds + (hundredths / 100.0)
 }
 
-// detectSilentSegments
+// detectSilentSegments (unchanged)
 func detectSilentSegments(cfg Config) []segment {
 	log.Println("Detecting silence... This may take a few minutes.")
 	silenceFilter := fmt.Sprintf("silencedetect=noise=%s:d=%.1f", cfg.SilenceThreshold, cfg.MinSilenceDur)
@@ -328,23 +340,19 @@ func detectSilentSegments(cfg Config) []segment {
 	return silences
 }
 
-// calculateNonSilentSegments
+// calculateNonSilentSegments (unchanged)
 func calculateNonSilentSegments(silences []segment, totalDuration float64, cfg Config) []segment {
-	songSegments := make([]segment, 0) // Initialize as empty, non-nil slice
+	songSegments := make([]segment, 0)
 	lastEndTime := 0.0
 
 	if len(silences) == 0 {
-		return songSegments // Return empty; main() handles this case
+		return songSegments
 	}
-
-	// 1. Handle first song
 	start := lastEndTime
 	end := silences[0].start
 	if (end - start) >= cfg.MinSongLength {
 		songSegments = append(songSegments, segment{start: start, end: end})
 	}
-
-	// 2. Handle middle songs
 	for i := 0; i < len(silences)-1; i++ {
 		start = silences[i].end
 		end = silences[i+1].start
@@ -352,26 +360,25 @@ func calculateNonSilentSegments(silences []segment, totalDuration float64, cfg C
 			songSegments = append(songSegments, segment{start: start, end: end})
 		}
 	}
-
-	// 3. Handle last song
 	lastSilenceEnd := silences[len(silences)-1].end
 	start = lastSilenceEnd
 	end = totalDuration
-	// The 0.1 check is to avoid tiny slivers at the end.
 	if (end-start) > 0.1 && (end-start) >= cfg.MinSongLength {
 		songSegments = append(songSegments, segment{start: start, end: end})
 	}
-
 	return songSegments
 }
 
-// splitVideoIntoSegments
-func splitVideoIntoSegments(cfg Config, segments []segment) {
+// splitVideoIntoSegments (MODIFIED)
+// Now returns a list of the files it created
+func splitVideoIntoSegments(cfg Config, segments []segment) []string {
 	if _, err := os.Stat(cfg.OutputDir); os.IsNotExist(err) {
 		os.Mkdir(cfg.OutputDir, 0755)
 		log.Printf("Created output directory: %s", cfg.OutputDir)
 	}
 	fileExt := filepath.Ext(cfg.InputFile)
+	exportedFiles := make([]string, 0)
+
 	for i, seg := range segments {
 		outputFilename := fmt.Sprintf("%s/%s_%02d%s", cfg.OutputDir, cfg.OutputPrefix, i+1, fileExt)
 		duration := seg.end - seg.start
@@ -388,34 +395,106 @@ func splitVideoIntoSegments(cfg Config, segments []segment) {
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			log.Printf("Error splitting segment %d: %s\nOutput: %s\n", i+1, err, string(output))
+		} else {
+			exportedFiles = append(exportedFiles, outputFilename)
 		}
 	}
+	return exportedFiles
 }
 
-// uploadToDrive uses rclone to push the output directory to cloud storage
+// uploadToDrive (unchanged)
 func uploadToDrive(cfg Config) {
 	log.Println("--- Starting Google Drive Upload ---")
-
-	// Construct the rclone destination path
-	// e.g., "gdrive:SplitSongs/output"
-	// rclone will create the "SplitSongs" folder if it doesn't exist.
 	destination := cfg.RcloneRemote + cfg.DriveSubfolder + "/" + cfg.OutputDir
-
 	log.Printf("Uploading local folder '%s' to '%s'", cfg.OutputDir, destination)
-
-	// Create the command: rclone copy [source] [destination]
-	// "copy" will only copy new/changed files, which is efficient.
-	// Use "sync" if you want to delete files from the remote. "copy" is safer.
 	cmd := exec.Command("rclone", "copy", cfg.OutputDir, destination, "-P")
-
-	// Set the command's output to go to our logger
 	cmd.Stdout = log.Writer()
 	cmd.Stderr = log.Writer()
-
 	if err := cmd.Run(); err != nil {
 		log.Printf("Error: rclone upload failed: %v", err)
 		log.Println("Please ensure rclone is installed and configured ('rclone config').")
 	} else {
 		log.Println("--- Google Drive Upload Complete ---")
 	}
+}
+
+// --- ADD THIS NEW FUNCTION ---
+// sanitizeFilename cleans a song title to be a valid file name
+func sanitizeFilename(name string) string {
+	// 1. Trim whitespace
+	name = strings.TrimSpace(name)
+	// 2. Define invalid characters (anything not a letter, number, space, hyphen, underscore)
+	invalidChars := regexp.MustCompile(`[^\w\s\-]`)
+	name = invalidChars.ReplaceAllString(name, "")
+	// 3. Replace spaces with underscores
+	name = strings.ReplaceAll(name, " ", "_")
+	// 4. Handle potential empty names
+	if name == "" {
+		name = "Untitled_Song"
+	}
+	return name
+}
+
+// --- ADD THIS NEW FUNCTION ---
+// renameFilesFromSetlist reads a setlist file and renames exported files
+func renameFilesFromSetlist(cfg Config, exportedFiles []string) {
+	log.Println("--- Renaming files from setlist ---")
+
+	// 1. Open the setlist file
+	file, err := os.Open(cfg.SetlistFile)
+	if err != nil {
+		log.Printf("Error: Could not open setlist file '%s': %v", cfg.SetlistFile, err)
+		log.Println("Skipping rename.")
+		return
+	}
+	defer file.Close()
+
+	// 2. Read song titles into a slice
+	var songTitles []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		title := scanner.Text()
+		if title != "" { // Skip empty lines
+			songTitles = append(songTitles, title)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("Error reading setlist file: %v", err)
+		log.Println("Skipping rename.")
+		return
+	}
+
+	// 3. Compare file counts
+	if len(songTitles) < len(exportedFiles) {
+		log.Printf("Warning: Setlist has %d songs, but %d files were exported.", len(songTitles), len(exportedFiles))
+		log.Println("Only the first %d files will be renamed.", len(songTitles))
+	} else if len(songTitles) > len(exportedFiles) {
+		log.Printf("Warning: Setlist has %d songs, but only %d files were exported.", len(songTitles), len(exportedFiles))
+	}
+
+	// 4. Rename files
+	for i, oldFilePath := range exportedFiles {
+		if i >= len(songTitles) {
+			break // Stop if we run out of song titles
+		}
+
+		// Get components of the old path
+		dir := filepath.Dir(oldFilePath)
+		ext := filepath.Ext(oldFilePath)
+
+		// Create new name
+		newSongName := sanitizeFilename(songTitles[i])
+		// Format: 01 - Song_Name.mp4
+		newFileName := fmt.Sprintf("%02d - %s%s", i+1, newSongName, ext)
+		newFilePath := filepath.Join(dir, newFileName)
+
+		// Rename
+		err := os.Rename(oldFilePath, newFilePath)
+		if err != nil {
+			log.Printf("Error renaming '%s' to '%s': %v", oldFilePath, newFilePath, err)
+		} else {
+			log.Printf("Renamed '%s' -> '%s'", filepath.Base(oldFilePath), newFileName)
+		}
+	}
+	log.Println("--- Setlist renaming complete ---")
 }

@@ -15,3 +15,6 @@ splitter.exe
 
 # Ignore weird MacOS stuffs
 .DS_Store
+
+# Ignore Uncle Barry's setlists
+setlist.txt
