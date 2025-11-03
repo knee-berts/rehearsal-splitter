@@ -12,12 +12,27 @@ This tool automates that process.
 
 ## ⚙️ How It Works
 
-This tool is a smart "controller" for the powerful **FFmpeg** multimedia framework. It works in two phases:
+This tool is a smart "controller" for the powerful **FFmpeg** multimedia framework. It works in phases:
 
 1.  **Detect Breaks:** It scans the audio track of your video, not for pure *silence*, but for periods of *quiet*. You define a decibel level (e.g., `-20dB`) that represents your "quiet" level (talking, tuning, amp hum). Any sound *below* this threshold is considered a "break," and any sound *above* it is considered a "song."
+
 2.  **Filter & Split:** It calculates the timestamps of all the "song" segments. It then filters out any segments that are too short (e.g., a 30-second false start) to meet your `min_song_length` requirement. Finally, it uses FFmpeg to create a new, separate video file for each valid song.
 
-Because it uses `ffmpeg`'s "copy" codec, this process is **extremely fast** and does not re-encode or reduce the quality of your video.
+3.  **Upload (Optional):** After splitting, it can automatically upload the new video files from your `output` folder to a specified folder in your Google Drive using `rclone`.
+
+Because it uses `ffmpeg`'s "copy" codec, the splitting process is **extremely fast** and does not re-encode or reduce the quality of your video.
+
+-----
+
+## Credits & Attribution
+
+This tool is written in **Go**, but it relies on free, open-source frameworks to function:
+
+  * **FFmpeg** ([ffmpeg.org](https://ffmpeg.org/)) **(Required)**
+    All audio analysis and video splitting are performed by FFmpeg.
+
+  * **rclone** ([rclone.org](https://rclone.org/)) **(Optional)**
+    Used for the optional upload-to-cloud-storage feature.
 
 -----
 
@@ -46,11 +61,30 @@ To verify it's installed, open a new terminal and type `ffmpeg`. You should see 
 
 If you don't already have it, [download and install the Go toolchain](https://go.dev/doc/install) for your operating system.
 
+### 3\. Install rclone (Optional)
+
+If you want to use the `-upload` feature, you must also install `rclone`.
+
+  * **macOS (easiest):**
+    ```sh
+    brew install rclone
+    ```
+  * **Windows (easiest):**
+    ```sh
+    choco install rclone
+    ```
+  * **Linux (Ubuntu/Debian):**
+    ```sh
+    sudo apt update && sudo apt install rclone
+    ```
+
+After installing, you must configure it one time by running `rclone config` and following the prompts to link your Google Drive (or other cloud) account.
+
 -----
 
 ## 🚀 Usage
 
-1.  Clone this repository or download the `split_practice.go`, `split_practice_test.go`, and `go.mod` files into a new directory.
+1.  Clone this repository or download the `splitter.go`, `splitter_test.go`, and `go.mod` files into a new directory.
 
 2.  Build the executable. This creates a single file (e.g., `splitter` or `splitter.exe`) that you can run.
 
@@ -67,6 +101,10 @@ If you don't already have it, [download and install the Go toolchain](https://go
       * **To override settings with CLI flags:**
         ```sh
         ./splitter -input="live_show.mkv" -threshold="-18dB" -duration=8.0 -minsonglength=90
+        ```
+      * **To run with flags and upload to Google Drive:**
+        ```sh
+        ./splitter -input="show.mp4" -threshold="-20dB" -upload=true -subfolder="Band/SplitShows"
         ```
 
 -----
@@ -91,7 +129,10 @@ You can create a `config.json` file in the same directory as the executable to s
   "min_silence_duration": 8.5,
   "silence_threshold": "-22dB",
   "min_song_length": 90.0,
-  "output_prefix": "MySong"
+  "output_prefix": "MySong",
+  "upload_to_drive": true,
+  "rclone_remote": "gdrive:",
+  "drive_subfolder": "Rehearsals/2025-11-03"
 }
 ```
 
@@ -105,6 +146,9 @@ You can create a `config.json` file in the same directory as the executable to s
 | **`min_song_length`** | `-minsonglength`| `120.0` | The minimum time (in seconds) a "song" must be to be exported. This filters out short false starts or tuning noodles. |
 | **`output_dir`** | `-output` | `"output"` | The folder where your split song files will be saved. |
 | **`output_prefix`** | `-prefix` | `"Song"` | The prefix for your new files (e.g., `Song_01.mp4`, `Song_02.mp4`). |
+| **`upload_to_drive`** | `-upload` | `false` | Set to `true` to enable uploading to cloud storage. |
+| **`rclone_remote`** | `-remote` | `"gdrive:"` | The name of your `rclone` remote (from `rclone config`). |
+| **`drive_subfolder`** | `-subfolder` | `"SplitSongs"` | The folder path inside your remote to upload to. |
 
 -----
 

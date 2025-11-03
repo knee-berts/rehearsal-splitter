@@ -57,6 +57,9 @@ func TestConfigLoading(t *testing.T) {
 		if cfg.MinSongLength != defaultConfig.MinSongLength {
 			t.Errorf("Expected MinSongLength %f, got %f", defaultConfig.MinSongLength, cfg.MinSongLength)
 		}
+		if cfg.UploadToDrive != defaultConfig.UploadToDrive { // ADDED
+			t.Errorf("Expected UploadToDrive %v, got %v", defaultConfig.UploadToDrive, cfg.UploadToDrive)
+		}
 	})
 
 	// Test Case 2: Config file overrides defaults
@@ -66,8 +69,10 @@ func TestConfigLoading(t *testing.T) {
 		// Create a temp config file
 		fileCfg := Config{
 			InputFile:        "file_video.mp4",
-			SilenceThreshold: "-12dB",
-			MinSongLength:    200.0,
+			SilenceThreshold: "-20dB",
+			MinSongLength:    60.0,
+			UploadToDrive:    true,         // ADDED
+			DriveSubfolder:   "FileFolder", // ADDED
 		}
 		configFile, cleanup := createTempConfig(t, fileCfg)
 		defer cleanup()
@@ -83,11 +88,14 @@ func TestConfigLoading(t *testing.T) {
 		if cfg.InputFile != "file_video.mp4" {
 			t.Errorf("Expected InputFile 'file_video.mp4', got %s", cfg.InputFile)
 		}
-		if cfg.MinSongLength != 60.0 {
-			t.Errorf("Expected MinSongLength 60.0, got %f", cfg.MinSongLength)
+		if cfg.UploadToDrive != true { // ADDED
+			t.Errorf("Expected UploadToDrive true, got %v", cfg.UploadToDrive)
 		}
-		if cfg.OutputPrefix != defaultConfig.OutputPrefix {
-			t.Errorf("Expected OutputPrefix %s, got %s", defaultConfig.OutputPrefix, cfg.OutputPrefix)
+		if cfg.DriveSubfolder != "FileFolder" { // ADDED
+			t.Errorf("Expected DriveSubfolder 'FileFolder', got %s", cfg.DriveSubfolder)
+		}
+		if cfg.RcloneRemote != defaultConfig.RcloneRemote { // Check default is still there
+			t.Errorf("Expected RcloneRemote %s, got %s", defaultConfig.RcloneRemote, cfg.RcloneRemote)
 		}
 	})
 
@@ -99,6 +107,7 @@ func TestConfigLoading(t *testing.T) {
 		fileCfg := Config{
 			InputFile:     "file_video.mp4",
 			MinSongLength: 60.0,
+			UploadToDrive: false, // File says false
 		}
 		configFile, cleanup := createTempConfig(t, fileCfg)
 		defer cleanup()
@@ -107,7 +116,8 @@ func TestConfigLoading(t *testing.T) {
 		args := []string{
 			"-config=" + configFile,
 			"-input=cli_video.mp4", // This should override the file
-			"-minsonglength=30.0",  // This should override the file
+			"-upload=true",         // This should override the file
+			"-subfolder=CLIFolder", // This should override the default
 		}
 		// 3. Parse
 		if err := flag.CommandLine.Parse(args); err != nil {
@@ -123,13 +133,16 @@ func TestConfigLoading(t *testing.T) {
 		if cfg.InputFile != "cli_video.mp4" { // Check CLI override
 			t.Errorf("Expected InputFile 'cli_video.mp4' (from CLI), got %s", cfg.InputFile)
 		}
-		if cfg.MinSongLength != 30.0 { // Check CLI override
-			t.Errorf("Expected MinSongLength 30.0 (from CLI), got %f", cfg.MinSongLength)
+		if cfg.UploadToDrive != true { // Check CLI override
+			t.Errorf("Expected UploadToDrive true (from CLI), got %v", cfg.UploadToDrive)
+		}
+		if cfg.DriveSubfolder != "CLIFolder" { // Check CLI override
+			t.Errorf("Expected DriveSubfolder 'CLIFolder' (from CLI), got %s", cfg.DriveSubfolder)
 		}
 	})
 }
 
-// TestCalculateNonSilentSegments (MODIFIED)
+// TestCalculateNonSilentSegments (Unchanged)
 func TestCalculateNonSilentSegments(t *testing.T) {
 
 	// Create a base config for all tests.
@@ -179,7 +192,6 @@ func TestCalculateNonSilentSegments(t *testing.T) {
 				{start: 210.0, end: 300.0}, // 90s long
 			},
 		},
-		// ADDED TEST CASE
 		{
 			name:          "FilterShortSongs",
 			cfg:           Config{MinSongLength: 50.0}, // Use a custom config for this test

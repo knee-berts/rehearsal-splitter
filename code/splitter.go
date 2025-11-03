@@ -21,6 +21,9 @@ type Config struct {
 	MinSongLength    float64 `json:"min_song_length"`
 	OutputPrefix     string  `json:"output_prefix"`
 	OutputDir        string  `json:"output_dir"`
+	UploadToDrive    bool    `json:"upload_to_drive"`
+	RcloneRemote     string  `json:"rclone_remote"`
+	DriveSubfolder   string  `json:"drive_subfolder"`
 }
 
 // segment holds the start and end time of a clip
@@ -37,6 +40,9 @@ var defaultConfig = Config{
 	MinSongLength:    200.0,
 	OutputPrefix:     "Song",
 	OutputDir:        "output",
+	UploadToDrive:    false,
+	RcloneRemote:     "gdrive:",
+	DriveSubfolder:   "SplitSongs",
 }
 
 // --- 2. Flag variables (global) ---
@@ -48,6 +54,9 @@ var (
 	cliMinSongLength float64
 	cliPrefix        string
 	cliOutput        string
+	cliUpload        bool
+	cliRemote        string
+	cliSubfolder     string
 )
 
 // defineFlags registers all CLI flags
@@ -59,6 +68,9 @@ func defineFlags() {
 	flag.Float64Var(&cliMinSongLength, "minsonglength", defaultConfig.MinSongLength, "Minimum song length (seconds)")
 	flag.StringVar(&cliPrefix, "prefix", defaultConfig.OutputPrefix, "Output file prefix")
 	flag.StringVar(&cliOutput, "output", defaultConfig.OutputDir, "Output directory")
+	flag.BoolVar(&cliUpload, "upload", defaultConfig.UploadToDrive, "Upload output folder to Google Drive")
+	flag.StringVar(&cliRemote, "remote", defaultConfig.RcloneRemote, "rclone remote name (e.g., 'gdrive:')")
+	flag.StringVar(&cliSubfolder, "subfolder", defaultConfig.DriveSubfolder, "Google Drive subfolder to upload to")
 }
 
 // loadConfig manages loading settings from defaults, file, and (parsed) cli flags.
@@ -88,6 +100,15 @@ func loadConfig() (Config, error) {
 		if fileConfig.OutputDir != "" {
 			cfg.OutputDir = fileConfig.OutputDir
 		}
+		if fileConfig.UploadToDrive {
+			cfg.UploadToDrive = fileConfig.UploadToDrive
+		}
+		if fileConfig.RcloneRemote != "" {
+			cfg.RcloneRemote = fileConfig.RcloneRemote
+		}
+		if fileConfig.DriveSubfolder != "" {
+			cfg.DriveSubfolder = fileConfig.DriveSubfolder
+		}
 	} else if !os.IsNotExist(err) {
 		// File exists but is bad
 		log.Printf("Warning: Could not parse config file '%s': %v. Using defaults.", configFilePath, err)
@@ -116,6 +137,15 @@ func loadConfig() (Config, error) {
 	}
 	if userSetFlags["output"] {
 		cfg.OutputDir = cliOutput
+	}
+	if userSetFlags["upload"] {
+		cfg.UploadToDrive = cliUpload
+	}
+	if userSetFlags["remote"] {
+		cfg.RcloneRemote = cliRemote
+	}
+	if userSetFlags["subfolder"] {
+		cfg.DriveSubfolder = cliSubfolder
 	}
 
 	return cfg, nil
@@ -148,31 +178,44 @@ func main() {
 		log.Fatalf("Error loading configuration: %v", err)
 	}
 
-	// MODIFIED Log message
 	log.Printf("Using config: Input='%s', Duration=%.1fs, Threshold=%s, MinSong=%.1fs, Output='%s'",
 		cfg.InputFile, cfg.MinSilenceDur, cfg.SilenceThreshold, cfg.MinSongLength, cfg.OutputDir)
 
-	// 3. Check for ffmpeg
+	// 3. --- rclone Pre-Check (NEW) ---
+	if cfg.UploadToDrive {
+		log.Println("Upload enabled, running rclone pre-check...")
+		if !isRcloneInstalled() {
+			log.Fatal("Error: 'upload_to_drive' is true but 'rclone' was not found in your PATH.")
+		}
+
+		if err := testRcloneConnection(cfg); err != nil {
+			log.Fatalf("rclone pre-check failed: %v\nPlease check 'rclone config' and your remote permissions.", err)
+		}
+		log.Println("rclone connection successful.")
+	}
+	// --- End Pre-Check ---
+
+	// 4. Check for ffmpeg
 	if !isFFmpegInstalled() {
 		log.Fatal("Error: 'ffmpeg' command not found. Please install FFmpeg and ensure it's in your system's PATH.")
 	}
 
-	// 4. Check if input file exists
+	// 5. Check if input file exists
 	if _, err := os.Stat(cfg.InputFile); os.IsNotExist(err) {
 		log.Fatalf("Error: Input file '%s' not found.", cfg.InputFile)
 	}
 
-	// 5. Get video duration
+	// 6. Get video duration
 	totalDuration := getVideoDuration(cfg)
 	log.Printf("Total video duration: %.2f seconds", totalDuration)
 
-	// 6. Detect silence
+	// 7. Detect silence
 	silences := detectSilentSegments(cfg)
 
-	// 7. Calculate valid song segments
+	// 8. Calculate valid song segments
 	songSegments := calculateNonSilentSegments(silences, totalDuration, cfg)
 
-	// 8. Handle "no silence" case
+	// 9. Handle "no silence" case
 	if len(silences) == 0 {
 		log.Println("No silence detected.")
 		if totalDuration >= cfg.MinSongLength {
@@ -181,12 +224,22 @@ func main() {
 		}
 	}
 
-	// 9. Export valid songs
+	// 10. Export valid songs
 	if len(songSegments) == 0 {
 		log.Println("No song segments found that meet the minimum length criteria.")
 	} else {
 		log.Printf("Found %d non-silent (song) segment(s) that meet criteria.", len(songSegments))
 		splitVideoIntoSegments(cfg, songSegments)
+	}
+
+	// 11. Upload to Drive (Optional)
+	if cfg.UploadToDrive {
+		// We already know rclone is installed, so we just check if the output dir exists
+		if _, err := os.Stat(cfg.OutputDir); os.IsNotExist(err) {
+			log.Printf("Skipping upload, output directory '%s' does not exist.", cfg.OutputDir)
+		} else {
+			uploadToDrive(cfg)
+		}
 	}
 
 	log.Println("\nAll done!")
@@ -210,6 +263,35 @@ func runFFmpeg(args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stderr.String(), err
+}
+
+// isRcloneInstalled checks if rclone is available in the system's PATH
+func isRcloneInstalled() bool {
+	cmd := exec.Command("rclone", "version")
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	return true
+}
+
+// testRcloneConnection attempts to create the target directory to verify auth
+func testRcloneConnection(cfg Config) error {
+	log.Println("Verifying rclone remote and permissions...")
+	// Construct the destination path (e.g., "gdrive:SplitSongs")
+	destination := cfg.RcloneRemote + cfg.DriveSubfolder
+
+	cmd := exec.Command("rclone", "mkdir", destination)
+
+	// We need to capture stderr, as rclone prints errors there
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Command failed
+		return fmt.Errorf("could not access rclone remote '%s'.\nError: %s", destination, stderr.String())
+	}
+	// Command succeeded
+	return nil
 }
 
 // getVideoDuration
@@ -307,5 +389,33 @@ func splitVideoIntoSegments(cfg Config, segments []segment) {
 		if err != nil {
 			log.Printf("Error splitting segment %d: %s\nOutput: %s\n", i+1, err, string(output))
 		}
+	}
+}
+
+// uploadToDrive uses rclone to push the output directory to cloud storage
+func uploadToDrive(cfg Config) {
+	log.Println("--- Starting Google Drive Upload ---")
+
+	// Construct the rclone destination path
+	// e.g., "gdrive:SplitSongs/output"
+	// rclone will create the "SplitSongs" folder if it doesn't exist.
+	destination := cfg.RcloneRemote + cfg.DriveSubfolder + "/" + cfg.OutputDir
+
+	log.Printf("Uploading local folder '%s' to '%s'", cfg.OutputDir, destination)
+
+	// Create the command: rclone copy [source] [destination]
+	// "copy" will only copy new/changed files, which is efficient.
+	// Use "sync" if you want to delete files from the remote. "copy" is safer.
+	cmd := exec.Command("rclone", "copy", cfg.OutputDir, destination, "-P")
+
+	// Set the command's output to go to our logger
+	cmd.Stdout = log.Writer()
+	cmd.Stderr = log.Writer()
+
+	if err := cmd.Run(); err != nil {
+		log.Printf("Error: rclone upload failed: %v", err)
+		log.Println("Please ensure rclone is installed and configured ('rclone config').")
+	} else {
+		log.Println("--- Google Drive Upload Complete ---")
 	}
 }
