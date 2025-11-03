@@ -1,0 +1,14 @@
+# Ignore the built binary file
+splitter
+splitter.exe
+
+# Ignore the output directory
+/output/
+
+# Ignore common video file formats
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.flv
