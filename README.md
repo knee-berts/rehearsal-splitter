@@ -16,9 +16,11 @@ This tool is a smart "controller" for the powerful **FFmpeg** multimedia framewo
 
 1.  **Detect Breaks:** It scans the audio track of your video, not for pure *silence*, but for periods of *quiet*. You define a decibel level (e.g., `-20dB`) that represents your "quiet" level (talking, tuning, amp hum). Any sound *below* this threshold is considered a "break," and any sound *above* it is considered a "song."
 
-2.  **Filter & Split:** It calculates the timestamps of all the "song" segments. It then filters out any segments that are too short (e.g., a 30-second false start) to meet your `min_song_length` requirement. Finally, it uses FFmpeg to create a new, separate video file for each valid song.
+2.  **Filter & Split:** It calculates the timestamps of all the "song" segments. It then filters out any segments that are too short (e.g., a 30-second false start) to meet your `min_song_length` requirement. Finally, it uses FFmpeg to create a new, separate video file for each valid song (e.g., `Song_01.mp4`, `Song_02.mp4`).
 
-3.  **Upload (Optional):** After splitting, it can automatically upload the new video files from your `output` folder to a specified folder in your Google Drive using `rclone`.
+3.  **Rename (Optional):** After splitting, it can read a `setlist.txt` file you provide to automatically rename the output files from `Song_01.mp4` to a numbered format like `01 - Your_Song_Name.mp4`.
+
+4.  **Upload (Optional):** Finally, it can automatically upload the new video files from your `output` folder to a specified folder in your Google Drive using `rclone`.
 
 Because it uses `ffmpeg`'s "copy" codec, the splitting process is **extremely fast** and does not re-encode or reduce the quality of your video.
 
@@ -106,6 +108,10 @@ After installing, you must configure it one time by running `rclone config` and 
         ```sh
         ./splitter -input="show.mp4" -threshold="-20dB" -upload=true -subfolder="Band/SplitShows"
         ```
+      * **To run with a setlist for renaming:**
+        ```sh
+        ./splitter -input="practice.mp4" -setlist="my_setlist.txt"
+        ```
 
 -----
 
@@ -132,7 +138,8 @@ You can create a `config.json` file in the same directory as the executable to s
   "output_prefix": "MySong",
   "upload_to_drive": true,
   "rclone_remote": "gdrive:",
-  "drive_subfolder": "Rehearsals/2025-11-03"
+  "drive_subfolder": "Rehearsals/2025-11-03",
+  "setlist_file": "my_setlist.txt"
 }
 ```
 
@@ -145,10 +152,36 @@ You can create a `config.json` file in the same directory as the executable to s
 | **`min_silence_duration`** | `-duration` | `5.0` | The minimum time (in seconds) a "break" must last to be counted. **Decrease this** if songs with short breaks are being lumped together. |
 | **`min_song_length`** | `-minsonglength`| `120.0` | The minimum time (in seconds) a "song" must be to be exported. This filters out short false starts or tuning noodles. |
 | **`output_dir`** | `-output` | `"output"` | The folder where your split song files will be saved. |
-| **`output_prefix`** | `-prefix` | `"Song"` | The prefix for your new files (e.g., `Song_01.mp4`, `Song_02.mp4`). |
+| **`output_prefix`** | `-prefix` | `"Song"` | The prefix for your new files (e.g., `Song_01.mp4`). Ignored if using a setlist. |
 | **`upload_to_drive`** | `-upload` | `false` | Set to `true` to enable uploading to cloud storage. |
 | **`rclone_remote`** | `-remote` | `"gdrive:"` | The name of your `rclone` remote (from `rclone config`). |
 | **`drive_subfolder`** | `-subfolder` | `"SplitSongs"` | The folder path inside your remote to upload to. |
+| **`setlist_file`** | `-setlist` | `""` (empty) | Path to a `.txt` file for renaming. If omitted, this feature is disabled. |
+
+### Using the Setlist Renaming Feature (Optional)
+
+If you provide a setlist file (e.g., using `-setlist="songs.txt"`), the tool will automatically rename the split files.
+
+1.  Create a simple `.txt` file (e.g., `songs.txt`).
+2.  List **one song title per line** in the exact order you played them.
+
+**Example `songs.txt`:**
+
+```
+Reba
+Kid Charlemagne
+Give Up the Funk
+Sabotage
+```
+
+The tool will take its output and rename it based on this file:
+
+  * `Song_01.mp4` → `01 - Reba.mp4`
+  * `Song_02.mp4` → `02 - Kid Charlemagne.mp4`
+  * `Song_03.mp4` → `03 - Give Up the Funk.mp4`
+  * `Song_04.mp4` → `04 - Sabotage.mp4`
+
+> **Note:** The script automatically sanitizes filenames, removing special characters (like `'` or `()`) and replacing spaces with underscores (`_`). If the setlist has fewer songs than the number of files created, it will only rename the files it has names for.
 
 -----
 
