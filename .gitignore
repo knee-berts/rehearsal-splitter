@@ -12,3 +12,6 @@ splitter.exe
 *.avi
 *.webm
 *.flv
+
+# Ignore weird MacOS stuffs
+.DS_Store
