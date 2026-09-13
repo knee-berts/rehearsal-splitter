@@ -80,27 +80,111 @@ func syncVideo(board, camera []float32, rate int, cfg syncConfig) (videoSync, er
 	return result, nil
 }
 
-// alignMix finds the time in a mixdown that lines up with the start of a song's video,
-// searching up to maxShift seconds either way. It returns that time and how many of the
-// fine windows agreed with it.
-func alignMix(camera, mix []float32, rate int, maxShift float64, cfg syncConfig) (mixStart float64, windows int, err error) {
-	coarse, err := coarseOffset(mix, camera, rate, cfg, maxShift)
-	if err != nil {
-		return 0, 0, err
+// mixAlignment says where a mixdown sits against a reference recording of the same song.
+type mixAlignment struct {
+	Start   float64 // time in the mixdown at the reference's first sample
+	Windows int     // fine windows that agreed; fewer than three is a weak match
+}
+
+const (
+	mixWindowSec = 10   // length of each fine window when lining up a mixdown
+	mixWindows   = 9    // fine windows spread across the song
+	maxSyncDrift = 0.02 // seconds a mixdown may drift from the reference by the end of the song
+)
+
+// alignMix lines up a mixdown with a reference recording of the same song, searching up to
+// maxShift seconds either way. A mixdown that plays at a different speed, as when a DAW
+// stretches the tracks to its tempo or converts their sample rate, cannot stay in sync at
+// any single offset, so that is reported as an error.
+func alignMix(ref, mix []float32, rate int, maxShift float64, cfg syncConfig) (mixAlignment, error) {
+	dur := float64(len(ref)) / float64(rate)
+	speed, coarse, ratio := estimateSpeed(ref, mix, rate, maxShift, cfg)
+	if ratio < cfg.MinRatio {
+		return mixAlignment{}, fmt.Errorf("no clear match between the mixdown and the recording (peak ratio %.2f)", ratio)
 	}
-	dur := float64(len(camera)) / float64(rate)
-	cfg.WindowSec = math.Min(cfg.WindowSec, dur/3)
-	cfg.Windows = 5
+	if math.Abs(speed-1)*dur > maxSyncDrift {
+		return mixAlignment{}, speedError(speed)
+	}
+
+	cfg.WindowSec = math.Min(mixWindowSec, dur/3)
+	cfg.Windows = mixWindows
 	var offsets []float64
 	for _, p := range windowStarts(dur, cfg) {
-		if offset, quality, ok := alignWindow(mix, camera, rate, p, coarse, cfg); ok && quality >= cfg.MinQuality {
+		if offset, quality, ok := alignWindow(mix, ref, rate, p, coarse, cfg); ok && quality >= cfg.MinQuality {
 			offsets = append(offsets, offset)
 		}
 	}
 	if len(offsets) == 0 {
-		return coarse, 0, nil
+		return mixAlignment{Start: coarse}, nil
 	}
-	return median(offsets), len(offsets), nil
+	return mixAlignment{Start: median(offsets), Windows: len(offsets)}, nil
+}
+
+// estimateSpeed finds how fast a mixdown plays compared with a reference: mixdown seconds
+// per reference second, 1 when they match. It stretches the mixdown's onset envelope over
+// speeds from 0.9 to 1.1 and keeps the one that lines up best within maxShift seconds. It
+// returns that speed, the mixdown time at the reference's start, and the peak ratio.
+func estimateSpeed(ref, mix []float32, rate int, maxShift float64, cfg syncConfig) (speed, offset, ratio float64) {
+	hop := rate / cfg.EnvRate
+	refEnv, mixEnv := onsetEnvelope(ref, hop), onsetEnvelope(mix, hop)
+	if len(refEnv) < 2 || len(mixEnv) < 2 {
+		return 1, 0, 0
+	}
+	limit := int(maxShift * float64(cfg.EnvRate))
+	center := len(refEnv) - 1
+	peak := func(s float64) float64 {
+		r := crossCorrelate(refEnv, warpEnvelope(mixEnv, s, len(refEnv)), false)
+		best := math.Inf(-1)
+		for i := max(center-limit, 0); i <= min(center+limit, len(r)-1); i++ {
+			best = math.Max(best, r[i])
+		}
+		return best
+	}
+
+	speed, best := 1.0, peak(1)
+	for i := -50; i <= 50; i++ { // 0.90 to 1.10 in steps of 0.2%
+		if p := peak(1 + float64(i)*0.002); p > best {
+			speed, best = 1+float64(i)*0.002, p
+		}
+	}
+	around := speed
+	for i := -40; i <= 40; i++ { // refine in steps of 0.005%
+		if p := peak(around + float64(i)*0.00005); p > best {
+			speed, best = around+float64(i)*0.00005, p
+		}
+	}
+
+	r := crossCorrelate(refEnv, warpEnvelope(mixEnv, speed, len(refEnv)), false)
+	lag, ratio := peakLag(r, len(refEnv), -limit, limit, cfg.EnvRate)
+	return speed, speed * lag / float64(cfg.EnvRate), ratio
+}
+
+// warpEnvelope reads env at speed times its normal rate and returns n frames; frames past
+// the end of env are zero.
+func warpEnvelope(env []float64, speed float64, n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		x := speed * float64(i)
+		j := int(x)
+		if j+1 >= len(env) {
+			break
+		}
+		f := x - float64(j)
+		out[i] = env[j]*(1-f) + env[j+1]*f
+	}
+	return out
+}
+
+// speedError explains a mixdown that plays at a different speed than the recording.
+func speedError(speed float64) error {
+	percent := (1/speed - 1) * 100
+	direction := "fast"
+	if percent < 0 {
+		percent, direction = -percent, "slow"
+	}
+	return fmt.Errorf("the mixdown plays %.2g%% %s compared with the recording, so it would drift out of sync; "+
+		"make sure the DAW isn't stretching the tracks to its session tempo or converting their sample rate, then export it again",
+		percent, direction)
 }
 
 // coarseOffset correlates onset envelopes to find the offset, in seconds, at which

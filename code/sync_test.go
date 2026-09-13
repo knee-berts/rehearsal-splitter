@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -82,18 +83,60 @@ func TestSyncVideoRejectsUnrelatedAudio(t *testing.T) {
 
 func TestAlignMix(t *testing.T) {
 	rng := rand.New(rand.NewSource(5))
-	performance := makeMusic(rng, 200)
-	camera := recordFrom(rng, performance, 20, 0, 120*testRate)
+	performance := makeMusic(rng, 120)
+	channels := recordFrom(rng, performance, 20, 0, 60*testRate)
 
 	for _, mixStart := range []float64{2.5, 0, -1.25} {
-		// A positive mixStart is a bounce with extra audio before the video's first frame.
-		mix := recordFrom(rng, performance, 20-mixStart, 0, 125*testRate)
-		got, windows, err := alignMix(camera, mix, testRate, 30, fastSyncConfig)
+		// A positive mixStart is a bounce with extra audio before the song's first sample.
+		mix := recordFrom(rng, performance, 20-mixStart, 0, 65*testRate)
+		got, err := alignMix(channels, mix, testRate, 30, fastSyncConfig)
 		if err != nil {
 			t.Fatalf("alignMix(%v) failed: %v", mixStart, err)
 		}
-		if math.Abs(got-mixStart) > 0.001 || windows == 0 {
-			t.Errorf("Expected mix start %.3fs, got %.4fs from %d windows", mixStart, got, windows)
+		if math.Abs(got.Start-mixStart) > 0.001 || got.Windows < 3 {
+			t.Errorf("Expected mix start %.3fs from at least 3 windows, got %+v", mixStart, got)
+		}
+	}
+}
+
+func TestAlignMixSpeed(t *testing.T) {
+	rng := rand.New(rand.NewSource(6))
+	performance := makeMusic(rng, 120)
+	channels := recordFrom(rng, performance, 20, 0, 60*testRate)
+
+	testCases := []struct {
+		name     string
+		ppm      float64 // how much faster the mixdown plays than the channels
+		expected string  // part of the expected error, or "" if the mixdown should line up
+	}{
+		{"StretchedToTempo", 25000, "plays 2.5% fast"},
+		{"SlightlySlow", -1000, "% slow"},
+		{"WithinTolerance", 100, ""},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			mix := recordFrom(rng, performance, 20, tc.ppm, 70*testRate)
+			got, err := alignMix(channels, mix, testRate, 30, fastSyncConfig)
+			switch {
+			case tc.expected == "" && err != nil:
+				t.Errorf("Expected the mixdown to line up, got %v", err)
+			case tc.expected == "" && math.Abs(got.Start) > 0.01:
+				t.Errorf("Expected a start near 0, got %+v", got)
+			case tc.expected != "" && (err == nil || !strings.Contains(err.Error(), tc.expected)):
+				t.Errorf("Expected an error containing %q, got %v", tc.expected, err)
+			}
+		})
+	}
+}
+
+func TestSpeedError(t *testing.T) {
+	testCases := map[float64]string{
+		0.97561: "plays 2.5% fast",
+		1.001:   "plays 0.1% slow",
+	}
+	for speed, expected := range testCases {
+		if err := speedError(speed); !strings.Contains(err.Error(), expected) {
+			t.Errorf("speedError(%v) = %q, expected it to contain %q", speed, err, expected)
 		}
 	}
 }

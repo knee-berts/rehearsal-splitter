@@ -47,7 +47,7 @@ func finishShow(opts showOptions) error {
 			continue
 		}
 
-		mixStart, windows, err := lineUpMix(clip, mix, opts.MaxShift)
+		align, reference, err := lineUpMix(folder, clip, mix, c.Start, opts.MaxShift)
 		if err != nil {
 			log.Printf("%s: could not line up %s with the video: %v", name, filepath.Base(mix), err)
 			failed++
@@ -57,14 +57,15 @@ func finishShow(opts showOptions) error {
 		if err != nil {
 			return err
 		}
-		if err := muxWithMix(clip, mix, dst, mixStart, dur); err != nil {
+		if err := muxWithMix(clip, mix, dst, align.Start, dur); err != nil {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 		note := ""
-		if windows < 3 {
-			note = " (weak match, so check the sync)"
+		if align.Windows < 3 {
+			note = "; the match was weak, so check the sync"
 		}
-		log.Printf("%s: wrote %s, mixdown offset %+.3fs%s", name, filepath.Base(dst), mixStart, note)
+		log.Printf("%s: wrote %s, mixdown offset %+.3fs (matched to the %s)%s",
+			name, filepath.Base(dst), align.Start, reference, note)
 		built++
 	}
 
@@ -81,17 +82,51 @@ func finishShow(opts showOptions) error {
 	return nil
 }
 
-// lineUpMix finds the time in the mixdown that matches the start of the song video.
-func lineUpMix(clip, mix string, maxShift float64) (float64, int, error) {
-	camera, err := decodeAudio(clip, syncRate, syncFilter, 0, 0)
-	if err != nil {
-		return 0, 0, err
-	}
+// lineUpMix finds the time in the mixdown that matches the first frame of the song video,
+// and names what the mixdown was matched against. It prefers the song's channel WAVs, which
+// the mixdown was made from and which prepare cut to start with the video, and falls back
+// to the camera audio if they are gone.
+func lineUpMix(folder, clip, mix string, cueStart, maxShift float64) (mixAlignment, string, error) {
 	mixAudio, err := decodeAudio(mix, syncRate, syncFilter, 0, 0)
 	if err != nil {
-		return 0, 0, err
+		return mixAlignment{}, "", err
 	}
-	return alignMix(camera, mixAudio, syncRate, maxShift, defaultSyncConfig)
+	ref, refAtVideo, reference, err := songReference(folder, clip, cueStart)
+	if err != nil {
+		return mixAlignment{}, "", err
+	}
+	align, err := alignMix(ref, mixAudio, syncRate, maxShift, defaultSyncConfig)
+	if err != nil {
+		return mixAlignment{}, reference, err
+	}
+	align.Start += refAtVideo
+	return align, reference, nil
+}
+
+// songReference decodes the audio a mixdown is matched against. It also returns the time in
+// that audio at the video's first frame and a description for the log.
+func songReference(folder, clip string, cueStart float64) ([]float32, float64, string, error) {
+	channels, err := boardChannels(filepath.Join(folder, channelsFolder))
+	if err != nil {
+		log.Printf("  No channel WAVs to match against (%v); using the camera audio.", err)
+		camera, err := decodeAudio(clip, syncRate, syncFilter, 0, 0)
+		return camera, 0, "camera audio", err
+	}
+	sum, _, err := decodeBoard(channels, levelRate)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	atVideo := 0.0
+	if cueStart < 0 {
+		// The song began before the camera rolled and prepare kept that audio, so the
+		// channels start before the video.
+		lead, err := firstVideoTime(clip)
+		if err != nil {
+			return nil, 0, "", err
+		}
+		atVideo = -cueStart - lead
+	}
+	return sum, atVideo, "channel WAVs", nil
 }
 
 // findMixdown returns the newest audio file in dir, or "" if there is none.

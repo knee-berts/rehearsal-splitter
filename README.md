@@ -236,13 +236,15 @@ The analysis takes a couple of minutes and is saved to `cues.csv` and `sync.json
 
 Import the WAVs from a song's `channels/` folder into your DAW at the start of the session, mix, and bounce the mixdown into that song's `mix/` folder. WAV, AIFF, FLAC, M4A, and MP3 all work; if there are several files, the newest is used.
 
+Export in the channels' own format, usually a 48 kHz / 24-bit WAV. A higher sample rate or bit depth only makes the file bigger, because the board recorded at 48 kHz and the song video's audio is encoded at 48 kHz. Also keep the DAW from stretching the tracks to its session tempo: a mixdown that plays even slightly fast or slow can't stay in sync with the video, and `finish` will refuse it.
+
 ### 4. Build the song videos
 
 ```sh
 ./splitter show finish ../gate-city-09-11-26
 ```
 
-For each song with a mixdown, `finish` matches the mixdown against the camera audio, so a bounce that starts a little early or late still lines up. It then writes `NN - Title.mp4` with the original video and the mix as AAC audio. Songs without a mixdown are listed and skipped, and finished songs are only rebuilt when their mixdown changes (or with `-force`).
+For each song with a mixdown, `finish` matches the mixdown against the song's channel WAVs (or the camera audio, if the channels have been deleted), so a bounce that starts a little early or late still lines up. It then writes `NN - Title.mp4` with the original video and the mix as AAC audio. Songs without a mixdown are listed and skipped, and finished songs are only rebuilt when their mixdown changes (or with `-force`).
 
 ### Show flags
 
