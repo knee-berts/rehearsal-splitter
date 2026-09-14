@@ -86,7 +86,7 @@ After installing, you must configure it one time by running `rclone config` and 
 
 ## 🚀 Usage
 
-1.  Clone this repository or download the `splitter.go`, `splitter_test.go`, and `go.mod` files into a new directory.
+1.  Clone this repository and open its `code` folder in a terminal.
 
 2.  Build the executable. This creates a single file (e.g., `splitter` or `splitter.exe`) that you can run.
 
@@ -182,6 +182,86 @@ The tool will take its output and rename it based on this file:
   * `Song_04.mp4` → `04 - Sabotage.mp4`
 
 > **Note:** The script automatically sanitizes filenames, removing special characters (like `'` or `()`) and replacing spaces with underscores (`_`). If the setlist has fewer songs than the number of files created, it will only rename the files it has names for.
+
+-----
+
+## 🎚️ Live Shows: Board Multitrack + Video
+
+For a show recorded on the mixing board (one WAV per channel for the whole show) and on camera (one video per set), `splitter show` builds a folder per song with every channel cut to that song, ready to mix, and then combines each finished mix with the song's video. The automated steps need only FFmpeg.
+
+### Show folder
+
+```
+gate-city-09-11-26/
+├── audio/        board channel WAVs, e.g. 01JVOX.WAV … 14OVHD2.WAV
+├── video/        set videos, e.g. Set 1.MP4, Set 2.MP4
+└── setlist.md    one song per line, with "SET 1:" / "SET 2:" headers
+```
+
+### 1. Prepare the songs
+
+```sh
+./splitter show prepare ../gate-city-09-11-26
+```
+
+This:
+
+1.  **Lines up each video with the board recording** by matching the camera's audio against the board channels. It also measures the clock drift between the camera and the recorder, so no timecode or clap is needed.
+2.  **Finds every song** from the instrument channels (vocal mics are ignored because they pick up talking and crowd noise), using the setlist's song counts. The longest gap is taken as the set break, and when two songs run together without a gap, they are split where the most instruments stop. A short burst of playing within 10 seconds of a song, like an ending where the band stops and starts, stays with that song.
+3.  **Writes one folder per song:**
+
+    ```
+    songs/
+    ├── cues.csv                     song boundaries (editable)
+    ├── sync.json                    where each video sits on the board recording
+    └── 07 - Creep/
+        ├── channels/                every board channel, cut to the song
+        ├── 07 - Creep (camera).mp4  the song's video with the camera audio
+        └── mix/                     put your mixdown here
+    ```
+
+    The channel WAVs and the camera video all start at the same instant, so they line up at 0:00 when imported into a DAW. Video is cut without re-encoding.
+
+The analysis takes a couple of minutes and is saved to `cues.csv` and `sync.json`, so later runs skip it.
+
+### 2. Check the song boundaries
+
+`prepare` prints a table of the songs with their start and end times in the set video, and notes any songs that ran together without a gap. To fix a boundary, edit `songs/cues.csv` (times are `H:MM:SS.mmm` in the video named on that row), then re-cut just those songs:
+
+```sh
+./splitter show prepare -recut -songs 22,23 ../gate-city-09-11-26
+```
+
+`prepare -redetect` analyzes the recordings again. Songs whose boundaries change are cut again, but a song that already has a mixdown keeps its boundaries, so a finished mix always matches its channels.
+
+### 3. Mix each song
+
+Import the WAVs from a song's `channels/` folder into your DAW at the start of the session, mix, and bounce the mixdown into that song's `mix/` folder. WAV, AIFF, FLAC, M4A, and MP3 all work; if there are several files, the newest is used.
+
+Export in the channels' own format, usually a 48 kHz / 24-bit WAV. A higher sample rate or bit depth only makes the file bigger, because the board recorded at 48 kHz and the song video's audio is encoded at 48 kHz. Also keep the DAW from stretching the tracks to its session tempo: a mixdown that plays even slightly fast or slow can't stay in sync with the video, and `finish` will refuse it.
+
+### 4. Build the song videos
+
+```sh
+./splitter show finish ../gate-city-09-11-26
+```
+
+For each song with a mixdown, `finish` matches the mixdown against the song's channel WAVs (or the camera audio, if the channels have been deleted), so a bounce that starts a little early or late still lines up. It then writes `NN - Title.mp4` with the original video and the mix as AAC audio. Songs without a mixdown are listed and skipped, and finished songs are only rebuilt when their mixdown changes (or with `-force`).
+
+### Show flags
+
+| Flag | Command | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `-audio` | prepare | `audio` | Folder with the board channel WAVs, inside the show folder. |
+| `-video` | prepare | `video` | Folder with the set videos, inside the show folder. |
+| `-setlist` | prepare | `setlist.md` or `setlist.txt` | Setlist file. |
+| `-out` | both | `songs` | Folder for the song folders, inside the show folder. |
+| `-songs` | both | all songs | Only process these song numbers, e.g. `3,7-9`. |
+| `-pre` / `-post` | prepare | `2` / `5` | Seconds to keep before and after each song, never past the middle of the gap to the next song. |
+| `-redetect` | prepare | `false` | Analyze the recordings again and update `cues.csv`. Songs that already have a mixdown keep their boundaries; songs whose boundaries change are cut again. |
+| `-recut` | prepare | `false` | Cut channel WAVs and videos again even if they exist. |
+| `-force` | finish | `false` | Rebuild song videos that are already up to date. |
+| `-maxshift` | finish | `30` | Largest offset, in seconds, to search between a mixdown and its video. |
 
 -----
 

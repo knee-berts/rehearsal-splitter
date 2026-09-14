@@ -176,8 +176,8 @@ func loadConfigFromFile(path string) (Config, error) {
 	return fileConfig, nil
 }
 
-// main is the entry point of our script (MODIFIED)
-func main() {
+// runLegacy splits one long video at its quiet breaks, using the flags and config.json.
+func runLegacy() {
 	// 1. Define & Parse flags
 	defineFlags()
 	flag.Parse()
@@ -467,7 +467,7 @@ func renameFilesFromSetlist(cfg Config, exportedFiles []string) {
 	// 3. Compare file counts
 	if len(songTitles) < len(exportedFiles) {
 		log.Printf("Warning: Setlist has %d songs, but %d files were exported.", len(songTitles), len(exportedFiles))
-		log.Println("Only the first %d files will be renamed.", len(songTitles))
+		log.Printf("Only the first %d files will be renamed.", len(songTitles))
 	} else if len(songTitles) > len(exportedFiles) {
 		log.Printf("Warning: Setlist has %d songs, but only %d files were exported.", len(songTitles), len(exportedFiles))
 	}
