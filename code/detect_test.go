@@ -80,6 +80,19 @@ func TestDetectShowSongs(t *testing.T) {
 			splits:   []float64{200},
 		},
 		{
+			name: "StopStartEndingStaysWithSong",
+			levels: buildLevels(span{10, quiet}, span{200, loud}, span{4, quiet}, span{4, loud}, span{8, quiet},
+				span{1, loud}, span{8, quiet}, span{19, loud}, span{30, quiet}, span{150, loud}, span{10, quiet}),
+			setSizes: []int{2},
+			expected: [][]segment{{{10, 254}, {284, 434}}},
+		},
+		{
+			name:     "CountInStaysWithSong",
+			levels:   buildLevels(span{30, quiet}, span{2, loud}, span{5, quiet}, span{200, loud}, span{30, quiet}),
+			setSizes: []int{1},
+			expected: [][]segment{{{30, 237}}},
+		},
+		{
 			name: "BreakdownInsideSongMerged",
 			levels: buildLevels(span{10, quiet}, span{100, loud}, span{5, quiet}, span{100, loud},
 				span{20, quiet}, span{150, loud}, span{10, quiet}),

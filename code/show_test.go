@@ -75,6 +75,39 @@ func TestVideoCovering(t *testing.T) {
 	}
 }
 
+func TestReconcileCues(t *testing.T) {
+	previous := []cue{
+		{Song: 1, Set: 1, Title: "Mixed", Video: "Set 1.MP4", Start: 10, End: 200},
+		{Song: 2, Set: 1, Title: "Unchanged", Video: "Set 1.MP4", Start: 210, End: 400.001},
+		{Song: 3, Set: 1, Title: "Longer ending", Video: "Set 1.MP4", Start: 410, End: 600},
+		{Song: 4, Set: 1, Title: "Mixed but not found", Video: "Set 1.MP4", Start: 610, End: 800},
+	}
+	detected := []cue{
+		{Song: 1, Set: 1, Title: "Mixed", Video: "Set 1.MP4", Start: 9, End: 205},
+		{Song: 2, Set: 1, Title: "Unchanged", Video: "Set 1.MP4", Start: 210, End: 400.0004},
+		{Song: 3, Set: 1, Title: "Longer ending", Video: "Set 1.MP4", Start: 410, End: 640},
+		{Song: 5, Set: 1, Title: "New", Video: "Set 1.MP4", Start: 810, End: 900},
+	}
+	mixed := map[int]bool{1: true, 4: true}
+	cues, recut, notes := reconcileCues(previous, detected, func(old cue) string {
+		if mixed[old.Song] {
+			return "it already has a mixdown"
+		}
+		return ""
+	})
+
+	expected := []cue{previous[0], detected[1], detected[2], previous[3], detected[3]}
+	if !reflect.DeepEqual(cues, expected) {
+		t.Errorf("Expected cues %+v\ngot %+v", expected, cues)
+	}
+	if !reflect.DeepEqual(recut, map[int]bool{3: true}) {
+		t.Errorf("Expected only song 3 to be cut again, got %v", recut)
+	}
+	if len(notes) != 2 {
+		t.Errorf("Expected notes for the kept song and the changed song, got %q", notes)
+	}
+}
+
 func TestFindMixdown(t *testing.T) {
 	dir := t.TempDir()
 	if got, err := findMixdown(filepath.Join(dir, "missing")); got != "" || err != nil {

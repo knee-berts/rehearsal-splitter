@@ -207,7 +207,7 @@ gate-city-09-11-26/
 This:
 
 1.  **Lines up each video with the board recording** by matching the camera's audio against the board channels. It also measures the clock drift between the camera and the recorder, so no timecode or clap is needed.
-2.  **Finds every song** from the instrument channels (vocal mics are ignored because they pick up talking and crowd noise), using the setlist's song counts. The longest gap is taken as the set break, and when two songs run together without a gap, they are split where the most instruments stop.
+2.  **Finds every song** from the instrument channels (vocal mics are ignored because they pick up talking and crowd noise), using the setlist's song counts. The longest gap is taken as the set break, and when two songs run together without a gap, they are split where the most instruments stop. A short burst of playing within 10 seconds of a song, like an ending where the band stops and starts, stays with that song.
 3.  **Writes one folder per song:**
 
     ```
@@ -231,6 +231,8 @@ The analysis takes a couple of minutes and is saved to `cues.csv` and `sync.json
 ```sh
 ./splitter show prepare -recut -songs 22,23 ../gate-city-09-11-26
 ```
+
+`prepare -redetect` analyzes the recordings again. Songs whose boundaries change are cut again, but a song that already has a mixdown keeps its boundaries, so a finished mix always matches its channels.
 
 ### 3. Mix each song
 
@@ -256,7 +258,7 @@ For each song with a mixdown, `finish` matches the mixdown against the song's ch
 | `-out` | both | `songs` | Folder for the song folders, inside the show folder. |
 | `-songs` | both | all songs | Only process these song numbers, e.g. `3,7-9`. |
 | `-pre` / `-post` | prepare | `2` / `5` | Seconds to keep before and after each song, never past the middle of the gap to the next song. |
-| `-redetect` | prepare | `false` | Analyze the recordings again and overwrite `cues.csv`. |
+| `-redetect` | prepare | `false` | Analyze the recordings again and update `cues.csv`. Songs that already have a mixdown keep their boundaries; songs whose boundaries change are cut again. |
 | `-recut` | prepare | `false` | Cut channel WAVs and videos again even if they exist. |
 | `-force` | finish | `false` | Rebuild song videos that are already up to date. |
 | `-maxshift` | finish | `30` | Largest offset, in seconds, to search between a mixdown and its video. |

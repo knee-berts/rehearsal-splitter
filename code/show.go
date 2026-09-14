@@ -148,6 +148,7 @@ func prepareShow(opts showOptions) error {
 
 	var sync showSync
 	var cues []cue
+	var recut map[int]bool
 	if !opts.Redetect && fileExists(cuesPath) && fileExists(syncPath) {
 		log.Printf("Using the song boundaries in %s (-redetect analyzes the recordings again).", cuesPath)
 		if sync, err = readSync(syncPath); err != nil {
@@ -164,6 +165,15 @@ func prepareShow(opts showOptions) error {
 		if sync, cues, err = analyzeShow(boards, videos, sets, opts); err != nil {
 			return err
 		}
+		if previous, err := readCues(cuesPath); err == nil {
+			var notes []string
+			cues, recut, notes = reconcileCues(previous, cues, func(old cue) string {
+				return keepReason(opts, outDir, old)
+			})
+			for _, note := range notes {
+				log.Printf("  %s", note)
+			}
+		}
 		if err = writeSync(syncPath, sync); err != nil {
 			return err
 		}
@@ -173,7 +183,79 @@ func prepareShow(opts showOptions) error {
 		log.Printf("Saved song boundaries to %s", cuesPath)
 	}
 	printCues(cues)
-	return cutSongs(opts, boards, sync, cues)
+	return cutSongs(opts, boards, sync, cues, recut)
+}
+
+// keepReason says why re-detection must keep a song's previous boundaries, or returns "" if
+// they may change.
+func keepReason(opts showOptions, outDir string, old cue) string {
+	if len(opts.Songs) > 0 && !opts.Songs[old.Song] {
+		return "it isn't in -songs"
+	}
+	mix, err := findMixdown(filepath.Join(outDir, songFolderName(old.Song, old.Title), mixFolder))
+	if err == nil && mix != "" {
+		return "it already has a mixdown"
+	}
+	return ""
+}
+
+// reconcileCues combines freshly detected cues with the previous cue sheet. A song whose
+// boundaries moved takes the new ones and is marked to be cut again, unless keep gives a
+// reason to hold on to the old ones, such as a finished mixdown made from the old cut. It
+// also returns a note for each song that changed, was kept, or disappeared.
+func reconcileCues(previous, detected []cue, keep func(old cue) string) ([]cue, map[int]bool, []string) {
+	old := make(map[int]cue, len(previous))
+	for _, c := range previous {
+		old[c.Song] = c
+	}
+	var cues []cue
+	var notes []string
+	recut := map[int]bool{}
+	found := map[int]bool{}
+	for _, c := range detected {
+		found[c.Song] = true
+		prev, existed := old[c.Song]
+		if !existed || sameBoundaries(prev, c) {
+			cues = append(cues, c)
+			continue
+		}
+		if reason := keep(prev); reason != "" {
+			cues = append(cues, prev)
+			notes = append(notes, fmt.Sprintf("%02d %s: kept %s because %s (detection now finds %s)",
+				prev.Song, prev.Title, cueSpan(prev), reason, cueSpan(c)))
+			continue
+		}
+		cues = append(cues, c)
+		recut[c.Song] = true
+		notes = append(notes, fmt.Sprintf("%02d %s: %s is now %s", c.Song, c.Title, cueSpan(prev), cueSpan(c)))
+	}
+	for _, prev := range previous {
+		if found[prev.Song] {
+			continue
+		}
+		if keep(prev) != "" {
+			cues = append(cues, prev)
+		} else {
+			notes = append(notes, fmt.Sprintf("%02d %s: not found by detection anymore", prev.Song, prev.Title))
+		}
+	}
+	sort.Slice(cues, func(a, b int) bool { return cues[a].Song < cues[b].Song })
+	return cues, recut, notes
+}
+
+// sameBoundaries reports whether two cues cut a song the same way, to the millisecond that
+// the cue sheet stores.
+func sameBoundaries(a, b cue) bool {
+	return a.Video == b.Video && math.Abs(a.Start-b.Start) < 0.002 && math.Abs(a.End-b.End) < 0.002
+}
+
+// cueSpan formats a cue's boundaries for notes, like "Set 2.MP4 0:20:01.992-0:24:14.494".
+func cueSpan(c cue) string {
+	video := c.Video
+	if video == "" {
+		video = "board"
+	}
+	return fmt.Sprintf("%s %s-%s", video, formatTimestamp(c.Start), formatTimestamp(c.End))
 }
 
 // analyzeShow lines every set video up with the board recording and detects the songs.
@@ -261,12 +343,14 @@ func analyzeShow(boards []wavInfo, videos []string, sets []Set, opts showOptions
 }
 
 // cutSongs writes each song's folder: channel WAVs, the camera video, and an empty mix folder.
-func cutSongs(opts showOptions, boards []wavInfo, sync showSync, cues []cue) error {
+// Existing files are kept unless -recut is set or the song is marked in recut.
+func cutSongs(opts showOptions, boards []wavInfo, sync showSync, cues []cue, recut map[int]bool) error {
 	outDir := filepath.Join(opts.Dir, opts.OutDir)
 	for _, c := range cues {
 		if len(opts.Songs) > 0 && !opts.Songs[c.Song] {
 			continue
 		}
+		again := opts.Recut || recut[c.Song]
 		name := songFolderName(c.Song, c.Title)
 		folder := filepath.Join(outDir, name)
 		for _, dir := range []string{filepath.Join(folder, channelsFolder), filepath.Join(folder, mixFolder)} {
@@ -287,7 +371,7 @@ func cutSongs(opts showOptions, boards []wavInfo, sync showSync, cues []cue) err
 				return err
 			}
 			clip := filepath.Join(folder, name+" (camera).mp4")
-			if opts.Recut || !fileExists(clip) {
+			if again || !fileExists(clip) {
 				if err := cutVideo(src, clip, key, math.Min(c.End, v.Duration)-key); err != nil {
 					return fmt.Errorf("song %d video: %w", c.Song, err)
 				}
@@ -309,7 +393,7 @@ func cutSongs(opts showOptions, boards []wavInfo, sync showSync, cues []cue) err
 		for _, b := range boards {
 			base := strings.TrimSuffix(filepath.Base(b.Path), filepath.Ext(b.Path))
 			dst := filepath.Join(folder, channelsFolder, base+".wav")
-			if !opts.Recut && fileExists(dst) {
+			if !again && fileExists(dst) {
 				continue
 			}
 			rate := float64(b.SampleRate)

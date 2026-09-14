@@ -10,7 +10,8 @@ type detectConfig struct {
 	FrameSec       float64 // seconds per level frame
 	QuietDropDB    float64 // frames this far below the loud level (90th percentile) are quiet
 	MinGapSec      float64 // shortest quiet run that can separate two songs
-	MinSongSec     float64 // shorter loud stretches (tuning, noodling) are ignored
+	MinSongSec     float64 // shorter loud stretches (tuning, noodling) are not songs on their own
+	AttachGapSec   float64 // a shorter loud stretch this close to a song belongs to it
 	SplitWinSec    float64 // window used to score split points
 	SplitMarginSec float64 // a split must leave at least this much song on both sides
 	MaxStopDB      float64 // cap on how much one channel's drop adds to the stop score
@@ -21,6 +22,7 @@ var defaultDetectConfig = detectConfig{
 	QuietDropDB:    20,
 	MinGapSec:      3,
 	MinSongSec:     60,
+	AttachGapSec:   10,
 	SplitWinSec:    2,
 	SplitMarginSec: 120,
 	MaxStopDB:      40,
@@ -74,7 +76,7 @@ func stopScores(samples []float32, channels int, use []int, hop int, maxDrop flo
 // returns each set's song segments in seconds, plus the times where songs ran together
 // without a gap and had to be split.
 func detectShowSongs(levels, stops []float64, setSizes []int, cfg detectConfig) ([][]segment, []float64) {
-	groups := splitIntoSets(loudStretches(movingAverage(levels, 3), cfg), len(setSizes))
+	groups := splitIntoSets(songStretches(movingAverage(levels, 3), cfg), len(setSizes))
 	songs := make([][]segment, len(setSizes))
 	var splits []float64
 	for i, g := range groups {
@@ -85,15 +87,15 @@ func detectShowSongs(levels, stops []float64, setSizes []int, cfg detectConfig) 
 	return songs, splits
 }
 
-// loudStretches returns the parts of the curve that stay loud for at least MinSongSec,
-// separated by quiet runs of at least MinGapSec.
+// loudStretches returns the loud parts of the curve, separated by quiet runs of at least
+// MinGapSec.
 func loudStretches(levels []float64, cfg detectConfig) []segment {
 	threshold := percentile(levels, 90) - cfg.QuietDropDB
 	minGap := int(math.Ceil(cfg.MinGapSec / cfg.FrameSec))
 
 	var segs []segment
 	add := func(from, to int) {
-		if float64(to-from)*cfg.FrameSec >= cfg.MinSongSec {
+		if to > from {
 			segs = append(segs, segment{start: float64(from) * cfg.FrameSec, end: float64(to) * cfg.FrameSec})
 		}
 	}
@@ -115,6 +117,50 @@ func loudStretches(levels []float64, cfg detectConfig) []segment {
 	}
 	add(loudStart, len(levels))
 	return segs
+}
+
+// songStretches returns the loud stretches that hold songs: those lasting at least
+// MinSongSec. A shorter stretch within AttachGapSec of a song joins that song, so an ending
+// or intro where the band stops and starts (the vocal carrying the gaps, or drum hits
+// answering it) is not cut off. Other short stretches, like tuning and noodling between
+// songs, are dropped.
+func songStretches(levels []float64, cfg detectConfig) []segment {
+	stretches := loudStretches(levels, cfg)
+	isSong := func(s segment) bool { return s.end-s.start >= cfg.MinSongSec }
+	for joined := true; joined; {
+		joined = false
+		for i, s := range stretches {
+			if isSong(s) {
+				continue
+			}
+			gapBefore, gapAfter := math.Inf(1), math.Inf(1)
+			if i > 0 && isSong(stretches[i-1]) {
+				gapBefore = s.start - stretches[i-1].end
+			}
+			if i+1 < len(stretches) && isSong(stretches[i+1]) {
+				gapAfter = stretches[i+1].start - s.end
+			}
+			if math.Min(gapBefore, gapAfter) > cfg.AttachGapSec {
+				continue
+			}
+			if gapBefore <= gapAfter {
+				stretches[i-1].end = s.end
+			} else {
+				stretches[i+1].start = s.start
+			}
+			stretches = append(stretches[:i], stretches[i+1:]...)
+			joined = true
+			break
+		}
+	}
+
+	var songs []segment
+	for _, s := range stretches {
+		if isSong(s) {
+			songs = append(songs, s)
+		}
+	}
+	return songs
 }
 
 // splitIntoSets divides songs into n groups at the n-1 longest gaps between them.
